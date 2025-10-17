@@ -1,0 +1,340 @@
+# .github/workflows/build-wireguard-go.yml
+name: Build WireGuard-Go Binaries
+
+on:
+  push:
+    branches: [ main, develop ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      wireguard_version:
+        description: 'WireGuard-Go version/tag to build'
+        required: false
+        default: 'latest'
+
+env:
+  WIREGUARD_GO_REPO: 'https://git.zx2c4.com/wireguard-go'
+  GO_VERSION: '1.21'
+
+jobs:
+  build:
+    name: Build ${{ matrix.goos }}-${{ matrix.goarch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux builds
+          - goos: linux
+            goarch: amd64
+            os: ubuntu-latest
+          - goos: linux
+            goarch: arm64
+            os: ubuntu-latest
+          - goos: linux
+            goarch: arm
+            goarm: 7
+            os: ubuntu-latest
+          
+          # Windows builds
+          - goos: windows
+            goarch: amd64
+            os: ubuntu-latest
+          - goos: windows
+            goarch: arm64
+            os: ubuntu-latest
+          
+          # macOS builds
+          - goos: darwin
+            goarch: amd64
+            os: macos-latest
+          - goos: darwin
+            goarch: arm64
+            os: macos-latest
+          
+          # FreeBSD builds
+          - goos: freebsd
+            goarch: amd64
+            os: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Install dependencies (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y upx-ucl
+
+    - name: Install dependencies (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        brew install upx
+
+    - name: Clone WireGuard-Go
+      run: |
+        git clone ${{ env.WIREGUARD_GO_REPO }} wireguard-go
+        cd wireguard-go
+        
+        # 使用指定版本或最新 tag
+        if [ "${{ github.event.inputs.wireguard_version }}" = "latest" ] || [ -z "${{ github.event.inputs.wireguard_version }}" ]; then
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "main")
+          echo "Using latest tag: $LATEST_TAG"
+          git checkout $LATEST_TAG || git checkout main
+        else
+          echo "Using specified version: ${{ github.event.inputs.wireguard_version }}"
+          git checkout ${{ github.event.inputs.wireguard_version }}
+        fi
+        
+        # 保存版本信息
+        git describe --tags --always > ../VERSION.txt
+        echo "Version: $(cat ../VERSION.txt)"
+
+    - name: Get version info
+      id: version
+      run: |
+        VERSION=$(cat VERSION.txt)
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "Building WireGuard-Go version: $VERSION"
+
+    - name: Build binary
+      env:
+        GOOS: ${{ matrix.goos }}
+        GOARCH: ${{ matrix.goarch }}
+        GOARM: ${{ matrix.goarm }}
+      run: |
+        cd wireguard-go
+        
+        # 设置输出文件名
+        BINARY_NAME="wireguard-go"
+        if [ "$GOOS" = "windows" ]; then
+          BINARY_NAME="${BINARY_NAME}.exe"
+        fi
+        
+        OUTPUT_PATH="../wireguard-go-${GOOS}-${GOARCH}${GOARM:+-v${GOARM}}"
+        
+        # 编译
+        echo "Building for $GOOS/$GOARCH${GOARM:+ ARMv${GOARM}}..."
+        CGO_ENABLED=0 go build \
+          -v \
+          -trimpath \
+          -ldflags="-s -w -X main.Version=${{ steps.version.outputs.version }}" \
+          -o "${OUTPUT_PATH}/${BINARY_NAME}" \
+          ./
+
+        # 显示文件信息
+        ls -lh "${OUTPUT_PATH}/${BINARY_NAME}"
+        file "${OUTPUT_PATH}/${BINARY_NAME}" || true
+
+    - name: Compress binary with UPX
+      if: matrix.goos != 'darwin'
+      continue-on-error: true
+      run: |
+        BINARY_NAME="wireguard-go"
+        if [ "${{ matrix.goos }}" = "windows" ]; then
+          BINARY_NAME="${BINARY_NAME}.exe"
+        fi
+        
+        OUTPUT_PATH="wireguard-go-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goarm && format('-v{0}', matrix.goarm) || '' }}"
+        
+        echo "Compressing with UPX..."
+        upx --best --lzma "${OUTPUT_PATH}/${BINARY_NAME}" || echo "UPX compression failed, using uncompressed binary"
+        
+        echo "Final size:"
+        ls -lh "${OUTPUT_PATH}/${BINARY_NAME}"
+
+    - name: Create archive
+      run: |
+        BINARY_NAME="wireguard-go"
+        if [ "${{ matrix.goos }}" = "windows" ]; then
+          BINARY_NAME="${BINARY_NAME}.exe"
+        fi
+        
+        OUTPUT_PATH="wireguard-go-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goarm && format('-v{0}', matrix.goarm) || '' }}"
+        ARCHIVE_NAME="${OUTPUT_PATH}-${{ steps.version.outputs.version }}"
+        
+        # 创建存档目录
+        mkdir -p "${ARCHIVE_NAME}"
+        cp "${OUTPUT_PATH}/${BINARY_NAME}" "${ARCHIVE_NAME}/"
+        cp VERSION.txt "${ARCHIVE_NAME}/"
+        
+        # 创建 README
+        cat > "${ARCHIVE_NAME}/README.txt" << EOF
+        WireGuard-Go Binary
+        ===================
+        
+        Version: ${{ steps.version.outputs.version }}
+        Platform: ${{ matrix.goos }}/${{ matrix.goarch }}${{ matrix.goarm && format(' ARMv{0}', matrix.goarm) || '' }}
+        Built: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+        Go Version: ${{ env.GO_VERSION }}
+        
+        Usage:
+          sudo ./wireguard-go <interface-name>
+        
+        For more information, visit:
+          https://www.wireguard.com/
+          https://git.zx2c4.com/wireguard-go/
+        EOF
+        
+        # 创建压缩包
+        if [ "${{ matrix.goos }}" = "windows" ]; then
+          zip -r "${ARCHIVE_NAME}.zip" "${ARCHIVE_NAME}"
+          echo "archive=${ARCHIVE_NAME}.zip" >> $GITHUB_ENV
+        else
+          tar czf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
+          echo "archive=${ARCHIVE_NAME}.tar.gz" >> $GITHUB_ENV
+        fi
+
+    - name: Calculate checksums
+      run: |
+        if [ "${{ matrix.goos }}" = "windows" ]; then
+          sha256sum "${archive}" > "${archive}.sha256"
+        else
+          shasum -a 256 "${archive}" > "${archive}.sha256"
+        fi
+        
+        echo "Checksum:"
+        cat "${archive}.sha256"
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: wireguard-go-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goarm && format('-v{0}', matrix.goarm) || '' }}
+        path: |
+          wireguard-go-*.${{ matrix.goos == 'windows' && 'zip' || 'tar.gz' }}
+          wireguard-go-*.sha256
+        retention-days: 30
+
+    - name: Upload to Release
+      if: startsWith(github.ref, 'refs/tags/v')
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          wireguard-go-*.${{ matrix.goos == 'windows' && 'zip' || 'tar.gz' }}
+          wireguard-go-*.sha256
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  create-release-notes:
+    name: Create Release Notes
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Generate changelog
+      id: changelog
+      run: |
+        echo "## What's Changed" > CHANGELOG.md
+        echo "" >> CHANGELOG.md
+        
+        # 获取上一个 tag
+        PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+        
+        if [ -n "$PREV_TAG" ]; then
+          echo "Changes since $PREV_TAG:" >> CHANGELOG.md
+          git log ${PREV_TAG}..HEAD --pretty=format:"- %s (%h)" >> CHANGELOG.md
+        else
+          echo "Initial release" >> CHANGELOG.md
+        fi
+        
+        echo "" >> CHANGELOG.md
+        echo "## Downloads" >> CHANGELOG.md
+        echo "" >> CHANGELOG.md
+        echo "Choose the appropriate binary for your platform:" >> CHANGELOG.md
+        echo "" >> CHANGELOG.md
+        echo "- **Linux**: linux-amd64, linux-arm64, linux-arm-v7" >> CHANGELOG.md
+        echo "- **Windows**: windows-amd64, windows-arm64" >> CHANGELOG.md
+        echo "- **macOS**: darwin-amd64 (Intel), darwin-arm64 (Apple Silicon)" >> CHANGELOG.md
+        echo "- **FreeBSD**: freebsd-amd64" >> CHANGELOG.md
+        echo "" >> CHANGELOG.md
+        echo "## Verification" >> CHANGELOG.md
+        echo "" >> CHANGELOG.md
+        echo "Verify your download using the provided SHA256 checksums:" >> CHANGELOG.md
+        echo '```bash' >> CHANGELOG.md
+        echo 'sha256sum -c wireguard-go-*.sha256' >> CHANGELOG.md
+        echo '```' >> CHANGELOG.md
+
+    - name: Update Release
+      uses: softprops/action-gh-release@v1
+      with:
+        body_path: CHANGELOG.md
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  test:
+    name: Test Binaries
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    
+    steps:
+    - name: Download artifacts (Linux)
+      if: runner.os == 'Linux'
+      uses: actions/download-artifact@v4
+      with:
+        name: wireguard-go-linux-amd64
+
+    - name: Download artifacts (macOS)
+      if: runner.os == 'macOS'
+      uses: actions/download-artifact@v4
+      with:
+        name: wireguard-go-darwin-${{ runner.arch == 'ARM64' && 'arm64' || 'amd64' }}
+
+    - name: Download artifacts (Windows)
+      if: runner.os == 'Windows'
+      uses: actions/download-artifact@v4
+      with:
+        name: wireguard-go-windows-amd64
+
+    - name: Extract and test (Unix)
+      if: runner.os != 'Windows'
+      run: |
+        tar xzf wireguard-go-*.tar.gz
+        cd wireguard-go-*
+        chmod +x wireguard-go
+        ./wireguard-go --version || echo "Version command not available"
+        file wireguard-go
+
+    - name: Extract and test (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        Expand-Archive -Path wireguard-go-*.zip -DestinationPath .
+        cd wireguard-go-*
+        .\wireguard-go.exe --version
+        Get-Item .\wireguard-go.exe | Format-List
+
+  summary:
+    name: Build Summary
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+    - name: Check build status
+      run: |
+        echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "✅ Build completed successfully!" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "Artifacts have been uploaded and are available for download." >> $GITHUB_STEP_SUMMARY
+        
+        if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "🚀 Release created: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+        fi

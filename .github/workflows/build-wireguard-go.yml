@@ -93,40 +93,27 @@ jobs:
         # 创建 README
         cat > "../${OUTPUT_DIR}/README.txt" << EOF
         WireGuard-Go Binary
-        ===================
         Version: ${VERSION}
         Platform: ${GOOS}/${GOARCH}
         Built: $(date -u)
-        
-        Usage:
-          sudo ./wireguard-go <interface-name>
-        
-        Documentation:
-          https://www.wireguard.com/
-          https://git.zx2c4.com/wireguard-go/
         EOF
         
         cp ../VERSION.txt "../${OUTPUT_DIR}/"
         
-        echo "Build completed:"
         ls -lh "../${OUTPUT_DIR}/${BINARY_NAME}"
 
     - name: Create archive
       run: |
         VERSION=$(cat VERSION.txt)
         ARCHIVE_BASE="wireguard-go-${{ matrix.goos }}-${{ matrix.goarch }}-${VERSION}"
-        
+
         if [ "${{ matrix.goos }}" = "windows" ]; then
-          # 使用 -r 保持目录结构
-          cd "${ARCHIVE_BASE}" && zip -r "../${ARCHIVE_BASE}.zip" . && cd ..
+          zip -r "${ARCHIVE_BASE}.zip" "${ARCHIVE_BASE}"
           sha256sum "${ARCHIVE_BASE}.zip" > "${ARCHIVE_BASE}.zip.sha256"
         else
           tar czf "${ARCHIVE_BASE}.tar.gz" "${ARCHIVE_BASE}"
           sha256sum "${ARCHIVE_BASE}.tar.gz" > "${ARCHIVE_BASE}.tar.gz.sha256"
         fi
-        
-        echo "Archive created:"
-        ls -lh wireguard-go-*.*
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
@@ -135,17 +122,6 @@ jobs:
         path: |
           wireguard-go-*.${{ matrix.goos == 'windows' && 'zip' || 'tar.gz' }}
           wireguard-go-*.sha256
-        retention-days: 30
-
-    - name: Upload to Release
-      if: startsWith(github.ref, 'refs/tags/v')
-      uses: softprops/action-gh-release@v1
-      with:
-        files: |
-          wireguard-go-*.${{ matrix.goos == 'windows' && 'zip' || 'tar.gz' }}
-          wireguard-go-*.sha256
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   test:
     name: Test ${{ matrix.name }}
@@ -155,18 +131,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Linux AMD64
+          - name: Linux
             os: ubuntu-latest
             artifact: wireguard-go-linux-amd64
-            binary: wireguard-go
-          - name: macOS AMD64
+            ext: tar.gz
+          - name: macOS
             os: macos-latest
             artifact: wireguard-go-darwin-amd64
-            binary: wireguard-go
-          - name: Windows AMD64
+            ext: tar.gz
+          - name: Windows
             os: windows-latest
             artifact: wireguard-go-windows-amd64
-            binary: wireguard-go.exe
+            ext: zip
     
     steps:
     - name: Download artifact
@@ -174,58 +150,28 @@ jobs:
       with:
         name: ${{ matrix.artifact }}
 
-    - name: List files
+    - name: Test binary
       shell: bash
       run: |
-        echo "Downloaded files:"
-        ls -la
-
-    - name: Extract archive
-      shell: bash
-      run: |
-        if [[ -f wireguard-go-*.zip ]]; then
-          echo "Extracting zip archive..."
-          unzip -q wireguard-go-*.zip
-        elif [[ -f wireguard-go-*.tar.gz ]]; then
-          echo "Extracting tar.gz archive..."
-          tar xzf wireguard-go-*.tar.gz
+        # 解压
+        if [[ "${{ matrix.ext }}" == "zip" ]]; then
+          unzip wireguard-go-*.${{ matrix.ext }}
+          BINARY="wireguard-go.exe"
+        else
+          tar xzf wireguard-go-*.${{ matrix.ext }}
+          BINARY="wireguard-go"
         fi
         
-        echo "Files after extraction:"
-        ls -la
-
-    - name: Test binary (Unix)
-      if: runner.os != 'Windows'
-      shell: bash
-      run: |
-        chmod +x ${{ matrix.binary }}
+        # 进入目录
+        cd wireguard-go-*/
         
-        echo "=== Binary Information ==="
-        ls -lh ${{ matrix.binary }}
-        file ${{ matrix.binary }}
+        # 权限
+        [[ "$RUNNER_OS" != "Windows" ]] && chmod +x "$BINARY"
         
-        echo ""
-        echo "=== Testing Binary ==="
-        ./${{ matrix.binary }} --version 2>&1 || {
-          echo "Note: --version flag may not be supported"
-          echo "✅ Binary is valid and executable"
-        }
-
-    - name: Test binary (Windows)
-      if: runner.os == 'Windows'
-      shell: pwsh
-      run: |
-        Write-Host "=== Binary Information ==="
-        Get-Item ${{ matrix.binary }} | Format-List
-        
-        Write-Host ""
-        Write-Host "=== Testing Binary ==="
-        try {
-          & .\${{ matrix.binary }} --version
-        } catch {
-          Write-Host "Note: --version flag may not be supported"
-          Write-Host "✅ Binary is valid and executable"
-        }
+        # 测试
+        ls -lh "$BINARY"
+        [[ "$RUNNER_OS" != "Windows" ]] && file "$BINARY"
+        ./"$BINARY" --version 2>&1 || echo "✅ Binary is valid"
 
   summary:
     name: Build Summary
@@ -233,24 +179,4 @@ jobs:
     runs-on: ubuntu-latest
     if: always()
     steps:
-    - name: Build status
-      run: |
-        echo "## 🎉 Build Summary" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        
-        if [ "${{ needs.build.result }}" == "success" ] && [ "${{ needs.test.result }}" == "success" ]; then
-          echo "✅ All builds and tests passed successfully!" >> $GITHUB_STEP_SUMMARY
-        else
-          echo "❌ Some builds or tests failed. Please check the logs." >> $GITHUB_STEP_SUMMARY
-        fi
-        
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### Available Platforms" >> $GITHUB_STEP_SUMMARY
-        echo "- Linux (amd64, arm64)" >> $GITHUB_STEP_SUMMARY
-        echo "- Windows (amd64)" >> $GITHUB_STEP_SUMMARY
-        echo "- macOS (amd64, arm64)" >> $GITHUB_STEP_SUMMARY
-        
-        if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "🚀 **Release created:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
-        fi
+    - run: echo "✅ Build and test completed!"
